@@ -1,6 +1,6 @@
 package part2_lowlevelserver
 
-import akka.actor.{Actor, ActorLogging, ActorSystem}
+import akka.actor.{Actor, ActorLogging, ActorSystem, Props}
 import akka.http.scaladsl.Http
 import akka.http.scaladsl.Http.IncomingConnection
 import akka.http.scaladsl.model.headers.Location
@@ -14,8 +14,17 @@ import akka.http.scaladsl.model.{
   Uri
 }
 import akka.stream.scaladsl.{Flow, Sink}
+import part2_lowlevelserver.GuitarDB.{
+  CreateGuitar,
+  FindAllGuitars,
+  GuitarCreated
+}
 import spray.json._
+import akka.pattern.ask
+import akka.util.Timeout
+
 import scala.concurrent.Future
+import scala.concurrent.duration.DurationInt
 
 case class Guitar(make: String, model: String)
 
@@ -76,4 +85,62 @@ object LowLevelRest extends App with GuitarStoreJsonProtocol {
       |""".stripMargin
 
   println(simpleGuitarJsonString.parseJson.convertTo[Guitar])
+  /*
+  setup - create actor
+   */
+  val guitarDb = system.actorOf(Props[GuitarDB], "lowLevelGuitarDB")
+  val guitarList = List(
+    Guitar("1", "2"),
+    Guitar("3", "4"),
+    Guitar("5", "6")
+  )
+
+  guitarList.foreach { guitar =>
+    guitarDb ! CreateGuitar(guitar)
+  }
+  /*
+  Server code
+   */
+  implicit val defaultTimeout = Timeout(2.seconds)
+  val requestHandler: HttpRequest => Future[HttpResponse] = {
+    case HttpRequest(HttpMethods.GET, Uri.Path("/api/guitar"), _, _, _) => {
+      val guitarsFuture: Future[List[Guitar]] =
+        (guitarDb ? FindAllGuitars).mapTo[List[Guitar]]
+      guitarsFuture.map { guitars =>
+        HttpResponse(
+          entity = HttpEntity(
+            ContentTypes.`application/json`,
+            guitars.toJson.prettyPrint
+          )
+        )
+      }
+    }
+    case HttpRequest(
+          HttpMethods.POST,
+          Uri.Path("/api/guitar"),
+          _,
+          entity,
+          _
+        ) => {
+      // entities are a Source[ByteString]
+      val strictEntityFuture = entity.toStrict(3.seconds)
+      strictEntityFuture.flatMap { strictEntity =>
+        val guitarJsonString = strictEntity.data.utf8String
+        val guitar = guitarJsonString.parseJson.convertTo[Guitar]
+        val guitarCreatedFuture: Future[GuitarCreated] =
+          (guitarDb ? CreateGuitar(guitar)).mapTo[GuitarCreated]
+        guitarCreatedFuture.map { _ =>
+          HttpResponse(StatusCodes.OK)
+        }
+      }
+    }
+    case request: HttpRequest => {
+      request.discardEntityBytes()
+      Future {
+        HttpResponse(status = StatusCodes.NotFound)
+      }
+    }
+  }
+
+  Http().newServerAt("localhost", 8080).bind(requestHandler)
 }
