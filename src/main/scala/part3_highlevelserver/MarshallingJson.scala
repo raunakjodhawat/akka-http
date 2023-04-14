@@ -2,6 +2,7 @@ package part3_highlevelserver
 
 import akka.actor.{Actor, ActorLogging, ActorSystem, Props}
 import akka.http.scaladsl.Http
+import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport
 import akka.http.scaladsl.server.Route
 import akka.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCodes}
 import akka.http.scaladsl.server.Directives._
@@ -12,7 +13,7 @@ import akka.util.Timeout
 import scala.concurrent.Future
 import scala.concurrent.duration.DurationInt
 import spray.json._
-
+import akka.pattern.ask
 case class Player(nickname: String, characterClass: String, level: Int)
 
 object GameAreaMap {
@@ -55,10 +56,17 @@ class GameAreaMap extends Actor with ActorLogging {
     }
   }
 }
-object MarshallingJson extends App {
+trait PlayerJsonProtocol extends DefaultJsonProtocol {
+  implicit val playerFormat = jsonFormat3(Player)
+}
+object MarshallingJson
+    extends App
+    with PlayerJsonProtocol
+    with SprayJsonSupport {
   implicit val system = ActorSystem("HighLevelExample")
 
   import system.dispatcher
+  implicit val timeout = Timeout(2.seconds)
   import GameAreaMap._
   val rtjvmGameMap = system.actorOf(Props[GameAreaMap], "rockthejvmGameAreaMap")
   val playerList = List(
@@ -85,19 +93,36 @@ object MarshallingJson extends App {
     get {
       path("class" / Segment) { characterclass =>
         {
-          reject
+          complete(
+            (rtjvmGameMap ? GetPLayersByClass(characterclass))
+              .mapTo[List[Player]]
+          )
         }
       } ~ (path(Segment) | parameter('nickname)) { nickname =>
         {
-          reject
+          complete((rtjvmGameMap ? GetPlayer(nickname)).mapTo[Option[Player]])
         }
       } ~ pathEndOrSingleSlash {
-        reject
+        complete(
+          (rtjvmGameMap ? GetAllPlayers)
+            .mapTo[List[Player]]
+        )
       }
     } ~ post {
-      reject
+      entity(as[Player]) { player =>
+        {
+          complete((rtjvmGameMap ? AddPlayer(player)).map(_ => StatusCodes.OK))
+        }
+      }
     } ~ delete {
-      reject
+      entity(as[Player]) { player =>
+        {
+          complete(
+            (rtjvmGameMap ? RemovePlayer(player)).map(_ => StatusCodes.OK)
+          )
+        }
+      }
     }
   }
+  Http().newServerAt("localhost", 8080).bind(rtjvmGameRouteSkel)
 }
